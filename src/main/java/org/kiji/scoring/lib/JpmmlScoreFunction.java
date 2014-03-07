@@ -16,14 +16,13 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.kiji.scoring;
+package org.kiji.scoring.lib;
 
+import javax.xml.bind.JAXBException;
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
 import java.util.Map;
-
-import javax.xml.bind.JAXBException;
 
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
@@ -39,7 +38,13 @@ import org.jpmml.evaluator.ModelEvaluatorFactory;
 import org.jpmml.manager.PMMLManager;
 import org.xml.sax.SAXException;
 
-import org.kiji.schema.*;
+import org.kiji.schema.KijiColumnName;
+import org.kiji.schema.KijiDataRequest;
+import org.kiji.schema.KijiDataRequestBuilder;
+import org.kiji.schema.KijiRowData;
+import org.kiji.scoring.FreshenerContext;
+import org.kiji.scoring.FreshenerSetupContext;
+import org.kiji.scoring.ScoreFunction;
 
 public class JpmmlScoreFunction extends ScoreFunction {
   private Evaluator mEvaluator;
@@ -148,5 +153,36 @@ public class JpmmlScoreFunction extends ScoreFunction {
       recordBuilder.set(entry.getKey().getValue(), entry.getValue());
     }
     return TimestampedValue.<GenericRecord>create(recordBuilder.build());
+  }
+
+  /**
+   * Builds the appropriate parameters for this score function.
+   *
+   * @param modelFile containing the trained PMML model.
+   * @param modelName of the trained PMML model.
+   * @param recordName of the output record to be stored from the trained PMML model.
+   * @param predictorColumns that the trained PMML model requires to generate a score.
+   * @param predictedFields that should be packed into the output record.
+   * @return the parameters to be used by this score function.
+   */
+  public static Map<String, String> parameters(
+      String modelFile,
+      String modelName,
+      String recordName,
+      Map<String, KijiColumnName> predictorColumns,
+      Map<String, String> predictedFields
+  ) {
+    Map<String, String> parameters = Maps.newHashMap();
+    parameters.put("model-file", modelFile);
+    parameters.put("model-name", modelName);
+    parameters.put("record-name", recordName);
+
+    for (Map.Entry<String, KijiColumnName> entry : predictorColumns.entrySet()) {
+      parameters.put(entry.getKey(), entry.getValue().getName());
+    }
+
+    parameters.putAll(predictedFields);
+
+    return parameters;
   }
 }
