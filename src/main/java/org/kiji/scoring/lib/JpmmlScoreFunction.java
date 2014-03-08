@@ -19,8 +19,12 @@
 package org.kiji.scoring.lib;
 
 import javax.xml.bind.JAXBException;
+import java.io.ByteArrayInputStream;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.List;
 import java.util.Map;
 
@@ -30,6 +34,7 @@ import com.google.common.collect.Maps;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
+import org.apache.hadoop.fs.Path;
 import org.dmg.pmml.FieldName;
 import org.dmg.pmml.IOUtil;
 import org.dmg.pmml.PMML;
@@ -50,17 +55,14 @@ public class JpmmlScoreFunction extends ScoreFunction {
   private Evaluator mEvaluator;
   private Schema mEvaluatorSchema;
 
-  static public Evaluator loadEvaluator(String modelFile, String modelName) {
-    PMML pmml = null;
-    try {
-      pmml = IOUtil.unmarshal(new File(modelFile));
-    } catch (IOException e) {
-      e.printStackTrace();
-    } catch (SAXException e) {
-      e.printStackTrace();
-    } catch (JAXBException e) {
-      e.printStackTrace();
-    }
+  static public Evaluator loadEvaluator(String modelFile, String modelName)
+      throws FileNotFoundException, JAXBException, SAXException {
+    return loadEvaluator(new FileInputStream(modelFile), modelName);
+  }
+
+  static public Evaluator loadEvaluator(Path modelFile, String modelName)
+      throws JAXBException, SAXException {
+    PMML pmml = IOUtil.unmarshal();
 
     final PMMLManager pmmlManager = new PMMLManager(pmml);
 
@@ -87,7 +89,7 @@ public class JpmmlScoreFunction extends ScoreFunction {
       Evaluator evaluator,
       FreshenerSetupContext context
   ) {
-    List<Schema.Field> fields = Lists.newArrayList();
+    final List<Schema.Field> fields = Lists.newArrayList();
     for (FieldName field : evaluator.getPredictedFields()) {
       final Schema.Field schemaField = new Schema.Field(
           field.getValue(),
@@ -101,23 +103,36 @@ public class JpmmlScoreFunction extends ScoreFunction {
       final Schema.Field schemaField = new Schema.Field(
           field.getValue(),
           schemaForField(field, context),
-          "",
+          null,
           null
       );
       fields.add(schemaField);
     }
-    return Schema.createRecord(fields);
+    final Schema predictedRecord =
+        Schema.createRecord(context.getParameter("record-name"), null, null, false);
+    predictedRecord.setFields(fields);
+    return predictedRecord;
   }
 
   @Override
   public void setup(FreshenerSetupContext context) throws IOException {
     final Map<String, String> parameters = context.getParameters();
-    Preconditions.checkArgument(parameters.containsKey("model-file"));
+//    Preconditions.checkArgument(parameters.containsKey("model-file"));
+    Preconditions.checkArgument(parameters.containsKey("model"));
     Preconditions.checkArgument(parameters.containsKey("model-name"));
-    mEvaluator = loadEvaluator(
-        context.getParameter("model-file"),
-        context.getParameter("model-name")
-    );
+    try {
+      mEvaluator = loadEvaluator(
+//          context.getParameter("model-file"),
+          new ByteArrayInputStream(context.getParameter("model").getBytes("UTF-8")),
+          context.getParameter("model-name")
+      );
+    } catch (JAXBException e) {
+      e.printStackTrace();
+      throw new IOException(e);
+    } catch (SAXException e) {
+      e.printStackTrace();
+      throw new IOException(e);
+    }
     mEvaluatorSchema = evaluatorSchema(mEvaluator, context);
 
     super.setup(context);
@@ -166,14 +181,17 @@ public class JpmmlScoreFunction extends ScoreFunction {
    * @return the parameters to be used by this score function.
    */
   public static Map<String, String> parameters(
-      String modelFile,
+//      String modelFile,
+      String model,
       String modelName,
       String recordName,
       Map<String, KijiColumnName> predictorColumns,
       Map<String, String> predictedFields
   ) {
     Map<String, String> parameters = Maps.newHashMap();
-    parameters.put("model-file", modelFile);
+    // TODO: Should this be a path to a file not the model file itself?
+//    parameters.put("model-file", modelFile);
+    parameters.put("model", model);
     parameters.put("model-name", modelName);
     parameters.put("record-name", recordName);
 

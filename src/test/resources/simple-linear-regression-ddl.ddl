@@ -6,10 +6,9 @@ CREATE TABLE linearreg WITH DESCRIPTION 'A table for scoring a simple linear reg
     INMEMORY = false,
     COMPRESSED WITH NONE,
     FAMILY model with DESCRIPTION 'Data related to scoring a simple linear regression model.' (
-      predictor "double" WITH DESCRIPTION 'The predictor field (x in y = ax + b).'
+      predictor "double" WITH DESCRIPTION 'The predictor field (x in y = ax + b).',
       predicted WITH SCHEMA {
         "type": "record",
-        "namespace": "org.kiji.scoring.avro",
         "name": "SimpleLinearRegressionPredicted",
         "fields": [
           { "name": "predicted", "type": "double" }

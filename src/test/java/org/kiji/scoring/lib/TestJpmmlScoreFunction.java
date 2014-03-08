@@ -9,6 +9,7 @@ import org.apache.avro.generic.GenericRecord;
 import org.apache.commons.io.IOUtils;
 import org.junit.After;
 import org.junit.Before;
+import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -26,6 +27,10 @@ import org.kiji.schema.util.Resources;
 import org.kiji.scoring.FreshKijiTableReader;
 import org.kiji.scoring.KijiFreshnessManager;
 
+/**
+ * Tests for JpmmlScoreFunction. Currently only tests one model given the assumption that JPMML has
+ * tested the logic of its implemented evaluators.
+ */
 public class TestJpmmlScoreFunction extends KijiClientTest {
   private static final Logger LOG = LoggerFactory.getLogger(TestJpmmlScoreFunction.class);
 
@@ -59,20 +64,24 @@ public class TestJpmmlScoreFunction extends KijiClientTest {
     mTable.release();
   }
 
+  @Test
   public void testLinearRegressionModel() throws Exception {
     final double expectedPredicted = 5.0;
     final EntityId eid = mTable.getEntityId("foo");
     final KijiDataRequest request = KijiDataRequest.create("model", "predicted");
 
+    final String pmmlModelString =
+        IOUtils.toString(Resources.openSystemResource("simple-linear-regression.xml"));
+
     // Setup parameters for score function.
     final Map<String, KijiColumnName> predictors = Maps.newHashMap();
     predictors.put("predictor", new KijiColumnName("model", "predictor"));
     final Map<String, String> predicted = Maps.newHashMap();
-    predicted.put("predicted", "predicted");
+    predicted.put("predicted", "\"double\"");
     final Map<String, String> parameters = JpmmlScoreFunction.parameters(
         // TODO: Write out the pmml file somewhere and read this in (possibly revisit the way this
         // is passed in).
-        "",
+        pmmlModelString,
         "linearreg",
         "SimpleLinearRegressionPredicted",
         predictors,
@@ -84,7 +93,7 @@ public class TestJpmmlScoreFunction extends KijiClientTest {
     try {
       manager.registerFreshener(
           "linearreg",
-          new KijiColumnName("model", "predictor"),
+          new KijiColumnName("model", "predicted"),
           new AlwaysFreshen(),
           new JpmmlScoreFunction(),
           parameters,
