@@ -284,6 +284,10 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
     return predictedRecord;
   }
 
+  public static Map<String, Schema> dataDictionaryToFieldSchemas(
+
+  )
+
   /**
    * Builds the appropriate parameters for this score function.
    *
