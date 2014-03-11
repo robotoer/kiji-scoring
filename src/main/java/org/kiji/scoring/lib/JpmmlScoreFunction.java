@@ -26,8 +26,6 @@ import javax.xml.bind.JAXBException;
 import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
-import com.google.gson.Gson;
-import com.google.gson.GsonBuilder;
 import org.apache.avro.Schema;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.avro.generic.GenericRecordBuilder;
@@ -36,10 +34,14 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
+import org.dmg.pmml.DataDictionary;
+import org.dmg.pmml.DataField;
+import org.dmg.pmml.DataType;
 import org.dmg.pmml.FieldName;
 import org.dmg.pmml.IOUtil;
 import org.dmg.pmml.PMML;
 import org.jpmml.evaluator.Evaluator;
+import org.jpmml.evaluator.FieldValue;
 import org.jpmml.evaluator.ModelEvaluatorFactory;
 import org.jpmml.manager.PMMLManager;
 import org.xml.sax.SAXException;
@@ -71,11 +73,10 @@ import org.kiji.scoring.ScoreFunction;
  *     "org.kiji.scoring.lib.JpmmlScoreFunction.result-record-name" - The name of the record that
  *     will contain the predicted and output records.
  *   </li>
- *   <li>
- *     "org.kiji.scoring.lib.JpmmlScoreFunction.result-field-types" - A JSON mapping from field name
- *     to field type (as an Avro JSON schema definition).
- *   </li>
  * </ul>
+ *
+ * Note: Extensions (http://www.dmg.org/v4-2/GeneralStructure.html#xsdElement_Extension) are
+ *     currently <b>NOT SUPPORTED</b>.
  */
 public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
   /** Parameter name for specifying the path to the trained model file. */
@@ -113,7 +114,6 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
     super.setup(context);
 
     final Configuration configuration = HBaseConfiguration.create();
-    final Gson gson = new GsonBuilder().create();
 
     // Ensure all parameters are specified correctly.
     final Map<String, String> parameters = context.getParameters();
@@ -142,20 +142,45 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
     final Path modelFilePath = new Path(parameters.get(MODEL_FILE_PARAMETER));
     final String modelName = parameters.get(MODEL_NAME_PARAMETER);
     final String resultRecordName = parameters.get(RESULT_RECORD_PARAMETER);
-    final Map<String, String> resultFieldTypes =
-        gson.fromJson(parameters.get(RESULT_TYPES_PARAMETER), Map.class);
 
+    // Load the PMML model.
+    PMML pmml;
     try {
-      mEvaluator = loadEvaluator(configuration, modelFilePath, modelName);
+      final FileSystem fileSystem = modelFilePath.getFileSystem(configuration);
+      try {
+        final FSDataInputStream fsDataInputStream = fileSystem.open(modelFilePath);
+        try {
+          pmml = IOUtil.unmarshal(fsDataInputStream);
+        } finally {
+          fsDataInputStream.close();
+        }
+      } finally {
+        fileSystem.close();
+      }
     } catch (JAXBException e) {
       throw new IOException(e);
     } catch (SAXException e) {
       throw new IOException(e);
     }
+    final PMMLManager pmmlManager = new PMMLManager(pmml);
+
+    // Load the default model
+    mEvaluator = (Evaluator) pmmlManager.getModelManager(
+        modelName,
+        ModelEvaluatorFactory.getInstance()
+    );
+
+    // Build required schemas.
+    final DataDictionary dataDictionary = pmmlManager.getDataDictionary();
+    final Map<FieldName, Schema> fieldSchemas = Maps.newHashMap();
+    for (DataField dataField : dataDictionary.getDataFields()) {
+      fieldSchemas.put(dataField.getName(), dataTypeToSchema(dataField.getDataType()));
+    }
+
     final List<FieldName> resultFields = Lists.newArrayList();
     resultFields.addAll(mEvaluator.getPredictedFields());
     resultFields.addAll(mEvaluator.getOutputFields());
-    mResultSchema = fieldNamesToSchema(resultRecordName, resultFields, resultFieldTypes);
+    mResultSchema = fieldNamesToSchema(resultRecordName, resultFields, fieldSchemas);
   }
 
   /**
@@ -207,45 +232,107 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
     // Pack this into a record and write it to the column.
     final GenericRecordBuilder resultRecordBuilder = new GenericRecordBuilder(mResultSchema);
     for (Map.Entry<FieldName, ?> entry : results.entrySet()) {
+      final FieldName fieldName = entry.getKey();
+      mEvaluator.getDataField(fieldName).getDataType();
       resultRecordBuilder.set(entry.getKey().getValue(), entry.getValue());
     }
     return TimestampedValue.<GenericRecord>create(resultRecordBuilder.build());
   }
 
   /**
-   * Creates a Jpmml evaluator from the specified model.
+   * Converts a PMML data type into an Avro schema.
    *
-   * @param configuration to use for reading files (if on hdfs).
-   * @param modelFile containing the trained PMML model.
-   * @param modelName of the trained PMML model.
-   * @return an evaluator for generating scores using the provided model.
-   * @throws JAXBException if an error is encountered while parsing the model file xml.
-   * @throws SAXException if an error is encountered while parsing the model file xml.
-   * @throws IOException if an error is encountered while reading the model file.
+   * @param dataType to convert.
+   * @return an appropriate Avro schema.
    */
-  public static Evaluator loadEvaluator(
-      final Configuration configuration,
-      final Path modelFile,
-      final String modelName
-  ) throws JAXBException, SAXException, IOException {
-    final FileSystem fileSystem = modelFile.getFileSystem(configuration);
-    try {
-      final FSDataInputStream fsDataInputStream = fileSystem.open(modelFile);
-      try {
-        final PMML pmml = IOUtil.unmarshal(fsDataInputStream);
-
-        final PMMLManager pmmlManager = new PMMLManager(pmml);
-
-        // Load the default model
-        return (Evaluator) pmmlManager.getModelManager(
-            modelName,
-            ModelEvaluatorFactory.getInstance()
+  public static Schema dataTypeToSchema(
+      final DataType dataType
+  ) {
+    switch (dataType) {
+      case STRING:
+        return Schema.create(Schema.Type.STRING);
+      case INTEGER:
+        return Schema.create(Schema.Type.LONG);
+      case FLOAT:
+        return Schema.create(Schema.Type.FLOAT);
+      case DOUBLE:
+        return Schema.create(Schema.Type.DOUBLE);
+      case BOOLEAN:
+        return Schema.create(Schema.Type.BOOLEAN);
+      case DATE:
+        return Schema.create(Schema.Type.STRING);
+      case TIME:
+        return Schema.create(Schema.Type.STRING);
+      case DATE_TIME:
+        return Schema.create(Schema.Type.STRING);
+      case DATE_DAYS_SINCE_0:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_DAYS_SINCE_1960:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_DAYS_SINCE_1970:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_DAYS_SINCE_1980:
+        return Schema.create(Schema.Type.LONG);
+      case TIME_SECONDS:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_TIME_SECONDS_SINCE_0:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_TIME_SECONDS_SINCE_1960:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_TIME_SECONDS_SINCE_1970:
+        return Schema.create(Schema.Type.LONG);
+      case DATE_TIME_SECONDS_SINCE_1980:
+        return Schema.create(Schema.Type.LONG);
+      default:
+        throw new IllegalArgumentException(
+            String.format("Unsupported DataType: %s", dataType.value())
         );
-      } finally {
-        fsDataInputStream.close();
-      }
-    } finally {
-      fileSystem.close();
+    }
+  }
+
+  public static <T> T fieldValueToAvro(
+      final Object data,
+      final DataType dataType
+  ) {
+    switch (dataType) {
+      case STRING:
+        break;
+      case INTEGER:
+        break;
+      case FLOAT:
+        break;
+      case DOUBLE:
+        break;
+      case BOOLEAN:
+        break;
+      case DATE:
+        break;
+      case TIME:
+        break;
+      case DATE_TIME:
+        break;
+      case DATE_DAYS_SINCE_0:
+        break;
+      case DATE_DAYS_SINCE_1960:
+        break;
+      case DATE_DAYS_SINCE_1970:
+        break;
+      case DATE_DAYS_SINCE_1980:
+        break;
+      case TIME_SECONDS:
+        break;
+      case DATE_TIME_SECONDS_SINCE_0:
+        break;
+      case DATE_TIME_SECONDS_SINCE_1960:
+        break;
+      case DATE_TIME_SECONDS_SINCE_1970:
+        break;
+      case DATE_TIME_SECONDS_SINCE_1980:
+        break;
+      default:
+        throw new IllegalArgumentException(
+            String.format("Unsupported DataType: %s", dataType.value())
+        );
     }
   }
 
@@ -261,18 +348,17 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
   public static Schema fieldNamesToSchema(
       final String recordName,
       final Iterable<FieldName> fieldNames,
-      final Map<String, String> fieldTypes
+      final Map<FieldName, Schema> fieldTypes
   ) {
-    final Schema.Parser parser = new Schema.Parser();
     final List<Schema.Field> fields = Lists.newArrayList();
     for (FieldName field : fieldNames) {
       Preconditions.checkArgument(
-          fieldTypes.containsKey(field.getValue()),
+          fieldTypes.containsKey(field),
           String.format("Missing type for field: %s", field.getValue())
       );
       final Schema.Field schemaField = new Schema.Field(
           field.getValue(),
-          parser.parse(fieldTypes.get(field.getValue())),
+          fieldTypes.get(field),
           null,
           null
       );
@@ -284,10 +370,6 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
     return predictedRecord;
   }
 
-  public static Map<String, Schema> dataDictionaryToFieldSchemas(
-
-  )
-
   /**
    * Builds the appropriate parameters for this score function.
    *
@@ -295,29 +377,19 @@ public class JpmmlScoreFunction extends ScoreFunction<GenericRecord> {
    * @param modelName of the trained PMML model.
    * @param predictorColumn that the trained PMML model requires to generate a score.
    * @param resultRecordName of the output record to be stored from the trained PMML model.
-   * @param resultFieldTypes of the output record.
    * @return the parameters to be used by this score function.
    */
   public static Map<String, String> parameters(
       final String modelFile,
       final String modelName,
       final KijiColumnName predictorColumn,
-      final String resultRecordName,
-      final Map<String, Schema> resultFieldTypes
+      final String resultRecordName
   ) {
-    final Gson gson = new GsonBuilder().create();
-
     final Map<String, String> parameters = Maps.newHashMap();
     parameters.put(MODEL_FILE_PARAMETER, modelFile);
     parameters.put(MODEL_NAME_PARAMETER, modelName);
     parameters.put(PREDICTOR_COLUMN_PARAMETER, predictorColumn.getName());
     parameters.put(RESULT_RECORD_PARAMETER, resultRecordName);
-
-    final Map<String, String> stringSchemaMap = Maps.newHashMap();
-    for (Map.Entry<String, Schema> entry : resultFieldTypes.entrySet()) {
-      stringSchemaMap.put(entry.getKey(), entry.getValue().toString(false));
-    }
-    parameters.put(RESULT_TYPES_PARAMETER, gson.toJson(stringSchemaMap));
 
     return parameters;
   }
